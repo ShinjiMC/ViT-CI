@@ -1,0 +1,16 @@
+batch_size: 128
+classes_num: 10
+dataset_name: cifar10
+dataset_path: data/
+device: cuda
+embedding_size: 768
+encoder_blocks_num: 12
+epoch: 200
+heads_num: 12
+load_from: null
+load_model_config: false
+patch_size: 16
+save_dir: checkpoints/
+save_interval: 5
+test: false
+use_cnn_embedding: false
