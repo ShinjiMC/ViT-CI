@@ -12,6 +12,9 @@ cd SimpleViT
 pip install -r requirements.txt
 pip install torch==1.8.0 torchvision==0.9.0 torchaudio==0.8.0 --extra-index-url https://download.pytorch.org/whl/cu111
 pip install pyyaml six
+pip install matplotlib
+pip install tensorboard
+
 ```
 
 ## Getting Started

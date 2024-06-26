@@ -1,10 +1,9 @@
 import os
 import argparse
-
 import datetime
-
+import matplotlib.pyplot as plt
 import numpy as np
-
+import torch
 from dataset.dataset_getter import DatasetGetter
 from vision_transformer.models import ViT
 from vision_transformer.learner import ViTLearner
@@ -22,6 +21,35 @@ def get_current_time() -> str:
     NOWTIMES = datetime.datetime.now()
     curr_time = NOWTIMES.strftime("%y%m%d_%H%M%S")
     return curr_time
+
+def evaluate_model(model, dataset_loader, device):
+    model.eval()
+    confidences = []
+    predictions = []
+    ground_truths = []
+
+    with torch.no_grad():
+        for images, labels in dataset_loader:
+            images = images.to(device)
+            labels = labels.to(device)
+            outputs = model(images)
+            probabilities = torch.nn.functional.softmax(outputs, dim=1)
+            confidence, predicted = torch.max(probabilities, 1)
+            confidences.extend(confidence.cpu().numpy())
+            predictions.extend(predicted.cpu().numpy())
+            ground_truths.extend(labels.cpu().numpy())
+
+    return confidences, predictions, ground_truths
+
+
+def plot_confidences(confidences):
+    plt.figure(figsize=(10, 5))
+    plt.hist(confidences, bins=20, alpha=0.7, label='Confidences')
+    plt.xlabel('Confidence')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Prediction Confidences')
+    plt.legend()
+    plt.show()
 
 
 def run(args):
@@ -73,6 +101,8 @@ def run(args):
 
     best_acc = 0.0
     best_epoch = 0
+    train_loss_history = []
+    train_acc_history = []
 
     for epoch in range(epoch):
         loss_list, acc_list = [], []
@@ -100,12 +130,58 @@ def run(args):
             logger.log(tag="Training/Loss", value=loss_avg, step=epoch + 1)
             logger.log(tag="Training/Accuracy", value=acc_avg, step=epoch + 1)
 
+        train_loss_history.append(loss_avg)
+        train_acc_history.append(acc_avg)
         print("[Epoch {}] Loss : {} | Accuracy : {}".format(epoch + 1, loss_avg, acc_avg))
 
     # Print best epoch and accuracy
     print("Best Accuracy: {} at Epoch: {}".format(best_acc, best_epoch))
 
-    logger.close()
+    # Close the logger
+    if not args.test:
+        logger.close()
+    # Plotting training loss and accuracy
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(train_loss_history, label='Training Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training Loss Over Epochs')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(train_acc_history, label='Training Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('Training Accuracy Over Epochs')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+    
+    # Load the best model for evaluation
+    best_model_path = os.path.join(model_save_dir, "best_model.pth")
+    load_model(model, best_model_path)
+    # Evaluate model on test set
+    test_dataset = DatasetGetter.get_dataset(
+        dataset_name=args.dataset_name, path=args.dataset_path, is_train=False
+    )
+    test_loader = DatasetGetter.get_dataset_loader(
+        dataset=test_dataset, batch_size=args.batch_size
+    )
+    confidences, predictions, ground_truths = evaluate_model(model, test_loader, device)
+    plot_confidences(confidences)
+
+    # Print some examples of confidences and corresponding predictions
+    for i in range(10):  # Print first 10 examples
+        print(f"Prediction: {predictions[i]}, Ground Truth: {ground_truths[i]}, Confidence: {confidences[i]}")
+
+    # Calculate and print the general confidence
+    correct_confidences = [conf for conf, pred, gt in zip(confidences, predictions, ground_truths) if pred == gt]
+    general_confidence = np.mean(correct_confidences)
+    print("General Confidence of the Model: {:.2f}%".format(general_confidence * 100))
+
 
 
 if __name__ == "__main__":
