@@ -32,7 +32,7 @@ python main.py --dataset-name cifar100 --classes-num 100 --device cuda --epoch 2
 
 python testImage.py
 
-python testImage100.py --load-from ./checkpoints/240625_232446/best_model.pth
+python testImage100.py --load-from ./checkpoints/240626_185453/best_model.pth
 
 ```
 

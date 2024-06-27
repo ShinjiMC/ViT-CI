@@ -143,7 +143,7 @@ if __name__ == "__main__":
 
     # Load model checkpoint using io.BytesIO
     #print("Loading model checkpoint...")
-    model_path = './checkpoints/240625_232446/best_model.pth'
+    model_path = './checkpoints/240626_185453/best_model.pth'
     model.load_state_dict(torch.load(model_path, map_location=args.device))
 
     # Load a random image and its class and label from CIFAR-100
