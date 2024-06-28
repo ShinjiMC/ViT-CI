@@ -175,6 +175,6 @@ epoch_*
 *.pth
 games/
 .vscode/
-
+checkpoints/
 # data
 data/

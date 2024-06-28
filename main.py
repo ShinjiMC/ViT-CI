@@ -1,6 +1,7 @@
 import os
 import argparse
 import datetime
+from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -51,11 +52,7 @@ def plot_confidences(confidences):
     plt.legend()
     plt.show()
 
-
-def run(args):
-    device = get_device(args.device)
-
-    # Getting Dataset
+def get_dataset_and_loader(args, device):
     dataset = DatasetGetter.get_dataset(
         dataset_name=args.dataset_name, path=args.dataset_path, is_train=not args.test
     )
@@ -63,20 +60,20 @@ def run(args):
         dataset=dataset, batch_size=1 if args.test else args.batch_size
     )
     sampled_data = next(iter(dataset_loader))[0].to(device)
-    n_channel, image_size = sampled_data.size()[1:3]
+    return dataset_loader, sampled_data
 
-    # Model Instantiation
-    if args.load_from and args.load_model_config:
-        dir_path = os.path.dirname(args.load_from)
-        config_file_path = dir_path + "/config.yaml"
-        config = load_from_yaml(config_file_path)
-        args.patch_size = config["patch_size"]
-        args.embedding_size = config["embedding_size"]
-        args.encoder_blocks_num = config["encoder_blocks_num"]
-        args.heads_num = config["heads_num"]
-        args.classes_num = config["classes_num"]
-
-    model = ViT(
+def load_model_config(args):
+    dir_path = os.path.dirname(args.load_from)
+    config_file_path = os.path.join(dir_path, "config.yaml")
+    config = load_from_yaml(config_file_path)
+    args.patch_size = config["patch_size"]
+    args.embedding_size = config["embedding_size"]
+    args.encoder_blocks_num = config["encoder_blocks_num"]
+    args.heads_num = config["heads_num"]
+    args.classes_num = config["classes_num"]
+    
+def create_model(args, n_channel, image_size, device):
+    return ViT(
         image_size=image_size,
         n_channel=n_channel,
         n_patch=args.patch_size,
@@ -86,47 +83,41 @@ def run(args):
         n_classes=args.classes_num,
         use_cnn_embedding=args.use_cnn_embedding,
     ).to(device)
-    if args.load_from is not None:
-        load_model(model, args.load_from)
+    
+def setup_training(args, model, sampled_data):
+    model_save_dir = os.path.join(args.save_dir, get_current_time())
+    logger = TensorboardLogger(model_save_dir)
+    logger.add_model_graph(model=model, image=sampled_data)
+    save_yaml(vars(args), os.path.join(model_save_dir, "config.yaml"))
+    return model_save_dir, logger
 
-    # Train / Test Iteration
-    learner = ViTLearner(model=model)
-    epoch = 1 if args.test else args.epoch
+def run_epoch(learner, dataset_loader, is_train, device):
+    loss_list, acc_list = [], []
+    for images, labels in dataset_loader:
+        images, labels = images.to(device), labels.to(device)
+        loss, acc = learner.step(images=images, labels=labels, is_train=is_train)
+        loss_list.append(loss)
+        acc_list.append(acc)
+    return np.mean(loss_list), np.mean(acc_list)
 
-    if not args.test:
-        model_save_dir = "{}/{}/".format(args.save_dir, get_current_time())
-        logger = TensorboardLogger(model_save_dir)
-        logger.add_model_graph(model=model, image=sampled_data)
-        save_yaml(vars(args), model_save_dir + "config.yaml")
-
+def train_or_test(args, epoch, learner, dataset_loader, model, model_save_dir=None, logger=None):
     best_acc = 0.0
     best_epoch = 0
     train_loss_history = []
     train_acc_history = []
 
     for epoch in range(epoch):
-        loss_list, acc_list = [], []
-        for images, labels in dataset_loader:
-            images = images.to(device)
-            labels = labels.to(device)
-            loss, acc = learner.step(
-                images=images, labels=labels, is_train=not args.test
-            )
-            loss_list.append(loss)
-            acc_list.append(acc)
-        loss_avg, acc_avg = np.mean(loss_list), np.mean(acc_list)
+        loss_avg, acc_avg = run_epoch(learner, dataset_loader, not args.test, args.device)
         
-        # Save model if it is the best so far
         if acc_avg > best_acc:
             best_acc = acc_avg
             best_epoch = epoch + 1
-            save_model(model, model_save_dir, "best_model")
+            if model_save_dir:
+                save_model(model, model_save_dir, "best_model")
 
-        if not args.test:
-            # Save model at intervals
+        if logger:
             if (epoch + 1) % args.save_interval == 0:
                 save_model(model, model_save_dir, "epoch_{}".format(epoch + 1))
-            # Log
             logger.log(tag="Training/Loss", value=loss_avg, step=epoch + 1)
             logger.log(tag="Training/Accuracy", value=acc_avg, step=epoch + 1)
 
@@ -134,13 +125,10 @@ def run(args):
         train_acc_history.append(acc_avg)
         print("[Epoch {}] Loss : {} | Accuracy : {}".format(epoch + 1, loss_avg, acc_avg))
 
-    # Print best epoch and accuracy
     print("Best Accuracy: {} at Epoch: {}".format(best_acc, best_epoch))
+    return train_loss_history, train_acc_history, best_acc, best_epoch
 
-    # Close the logger
-    if not args.test:
-        logger.close()
-    # Plotting training loss and accuracy
+def plot_training_history(train_loss_history, train_acc_history):
     plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
@@ -160,10 +148,10 @@ def run(args):
     plt.tight_layout()
     plt.show()
     
-    # Load the best model for evaluation
+def evaluate_and_print_results(args, model, model_save_dir, device):
     best_model_path = os.path.join(model_save_dir, "best_model.pth")
     load_model(model, best_model_path)
-    # Evaluate model on test set
+
     test_dataset = DatasetGetter.get_dataset(
         dataset_name=args.dataset_name, path=args.dataset_path, is_train=False
     )
@@ -173,15 +161,36 @@ def run(args):
     confidences, predictions, ground_truths = evaluate_model(model, test_loader, device)
     plot_confidences(confidences)
 
-    # Print some examples of confidences and corresponding predictions
     for i in range(10):  # Print first 10 examples
         print(f"Prediction: {predictions[i]}, Ground Truth: {ground_truths[i]}, Confidence: {confidences[i]}")
 
-    # Calculate and print the general confidence
     correct_confidences = [conf for conf, pred, gt in zip(confidences, predictions, ground_truths) if pred == gt]
     general_confidence = np.mean(correct_confidences)
     print("General Confidence of the Model: {:.2f}%".format(general_confidence * 100))
 
+def get_current_time():
+    return datetime.now().strftime('%Y%m%d_%H%M%S')
+
+def run(args):
+    device = get_device(args.device)
+    dataset_loader, sampled_data = get_dataset_and_loader(args, device)
+    n_channel, image_size = sampled_data.size()[1:3]
+    if args.load_from and args.load_model_config:
+        load_model_config(args)
+    model = create_model(args, n_channel, image_size, device)
+    if args.load_from is not None:
+        load_model(model, args.load_from)
+    learner = ViTLearner(model=model)
+    epoch = 1 if args.test else args.epoch
+    if not args.test:
+        model_save_dir, logger = setup_training(args, model, sampled_data)
+    train_loss_history, train_acc_history, _, _ = train_or_test(
+        args, epoch, learner, dataset_loader, model, model_save_dir if not args.test else None, logger if not args.test else None
+    )
+    if not args.test:
+        logger.close()
+    plot_training_history(train_loss_history, train_acc_history)
+    evaluate_and_print_results(args, model, model_save_dir, device)
 
 
 if __name__ == "__main__":

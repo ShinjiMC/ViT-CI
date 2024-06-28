@@ -1,4 +1,4 @@
-import os, io
+import os
 import torch
 import torchvision.transforms as transforms
 from torchvision.datasets import CIFAR100
@@ -8,10 +8,10 @@ from vision_transformer.models import ViT
 import random
 import yaml
 import argparse
-from utils.log import TensorboardLogger
+import pickle
+from PIL import Image
 from dataset.dataset_getter import DatasetGetter
 
-# Defining superclass and fine class names for CIFAR-100
 superclass_names = [
     'aquatic mammals', 'fish', 'flowers', 'food containers', 'fruit and vegetables',
     'household electrical devices', 'household furniture', 'insects', 'large carnivores',
@@ -44,44 +44,60 @@ fine_class_names = [
 
 def get_class_name(class_index):
     if class_index < 0 or class_index >= 100:
-        return "Unknown"  # Si el índice está fuera de rango, retorna "Unknown"
-    
+        return "Unknown"    
     superclass_index = class_index // 5
     fine_label_within_superclass = class_index % 5
-    
     if superclass_index >= len(fine_class_names) or fine_label_within_superclass >= len(fine_class_names[superclass_index]):
-        return "Unknown"  # Si los índices calculados están fuera de rango, retorna "Unknown"
-    
+        return "Unknown"
     return fine_class_names[superclass_index][fine_label_within_superclass]
 
-# Function to load a random image from CIFAR-100
 def load_random_cifar100_image():
+    def load_cifar100_batch(file):
+        with open(file, 'rb') as f:
+            data_dict = pickle.load(f, encoding='bytes')
+        return data_dict
+
+    # Load CIFAR-100 data
+    data_dir = './data/cifar-100-python'
+    test_data = load_cifar100_batch(os.path.join(data_dir, 'test'))
+    test_images = test_data[b'data']
+    test_labels = test_data[b'fine_labels']
+
+    # Randomize test images
+    indices = list(range(len(test_images)))
+    random.shuffle(indices)
+
+    # Transform
     transform = transforms.Compose([
         transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))  # Normalización para CIFAR-100
     ])
-    cifar_dataset = CIFAR100(root='./data', train=False, download=True, transform=transform)
-    image_index = random.randint(0, len(cifar_dataset) - 1)
-    image, fine_label = cifar_dataset[image_index]
-    superclass_index = fine_label // 5
-    return image, fine_label, superclass_index  # Returns the image, fine label, and superclass index
 
-# Function to perform inference with the model
+    # Select a random image
+    random_index = indices[0]
+    image_data = test_images[random_index]
+    fine_label = test_labels[random_index]
+
+    # Reshape and transform the image
+    image_data = image_data.reshape(3, 32, 32).transpose(1, 2, 0)
+    image = Image.fromarray(image_data)
+    image = transform(image)
+
+    return image, fine_label
+
 def test_model_with_image(model, image_tensor, device):
     model.eval()
     with torch.no_grad():
-        image_tensor = image_tensor.to(device)
+        image_tensor = image_tensor.to(device).unsqueeze(0)  # Añadir una dimensión para el batch
         outputs = model(image_tensor)
-        _, predicted = torch.max(outputs, 1)
+        predicted_probs = torch.softmax(outputs, dim=1)
+        _, predicted = torch.max(predicted_probs, 1)
         predicted_label = predicted.item()
-        #print(predicted_label)
         predicted_class = get_class_name(predicted_label)
-        #print(predicted_class)
-        return outputs, predicted_label, predicted_class # Returns logits, predicted label, and predicted class
+        return predicted_probs, predicted_label, predicted_class
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test ViT model on CIFAR-100")
-    
-    # Arguments for device and model loading
     parser.add_argument(
         "--load-from",
         type=str,
@@ -90,12 +106,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     model_dir = os.path.dirname(args.load_from)
-    
-    # Debug prints to check args.load_from
-    #print(f"Loading model from: {args.load_from}")
-    #print(f"Model directory: {model_dir}")
-    
-    # Load configuration from config.yaml if available
     config_file_path = os.path.join(model_dir, "config.yaml")
     if os.path.exists(config_file_path):
         with open(config_file_path, 'r') as f:
@@ -116,8 +126,6 @@ if __name__ == "__main__":
         args.save_interval = config["save_interval"]
         args.test = config["test"]
         args.use_cnn_embedding = config["use_cnn_embedding"]
-
-    # Prepare the model
     transform = transforms.Compose([
         transforms.ToTensor(),
     ])
@@ -129,7 +137,6 @@ if __name__ == "__main__":
     )
     sampled_data = next(iter(dataset_loader))[0].to(args.device)
     n_channel, image_size = sampled_data.size()[1:3]
-
     model = ViT(
         image_size=image_size,
         n_channel=n_channel,
@@ -140,36 +147,25 @@ if __name__ == "__main__":
         n_classes=args.classes_num,
         use_cnn_embedding=args.use_cnn_embedding,
     ).to(args.device)
-
-    # Load model checkpoint using io.BytesIO
-    #print("Loading model checkpoint...")
-    model_path = './checkpoints/240626_185453/best_model.pth'
+    model_path = os.path.join(model_dir, "best_model.pth")
     model.load_state_dict(torch.load(model_path, map_location=args.device))
-
-    # Load a random image and its class and label from CIFAR-100
-    image_np, fine_label, superclass_index = load_random_cifar100_image()
-    image_tensor = image_np.unsqueeze(0)  # Convert to a batch of size 1
     
-    # Perform inference with the model
+    # Cargar una imagen aleatoria del CIFAR-100
+    image_tensor, fine_label = load_random_cifar100_image()
+    
+    # Probar el modelo con la imagen cargada
     outputs, predicted_label, predicted_class = test_model_with_image(model, image_tensor, args.device)
     
-    # Display results
+    predicted_probs = outputs.cpu().numpy().squeeze()
+    p_prob = np.max(predicted_probs)
+    p_class = np.argmax(predicted_probs)
+    
+    # Mostrar la imagen y la predicción
     plt.figure(figsize=(8, 4))
-    plt.subplot(1, 2, 1)
-    # Transpose the image to (32, 32, 3) format
-    plt.imshow(np.transpose(image_np, (1, 2, 0)))
+    plt.imshow(np.transpose(image_tensor.cpu().numpy(), (1, 2, 0)))
     plt.axis('off')
-    plt.title(f'CIFAR-100 Image: {fine_class_names[superclass_index][fine_label % 5]}')
-
-    plt.subplot(1, 2, 2)
-    # Plot all n_classes probabilities
-    predicted_probs = torch.softmax(outputs, dim=1).cpu().numpy().squeeze()
-    plt.barh(np.arange(len(predicted_probs)), predicted_probs)
-    plt.yticks(np.arange(len(predicted_probs)), np.arange(len(predicted_probs)))  # Assuming index labels here
-    plt.xlabel('Probability')
-    plt.title(f'Prediction: {predicted_class}')
-
+    plt.title(f'Fine Label: {get_class_name(fine_label)}, Prediction: {predicted_class} (Confidence: {p_prob:.2f})')
     plt.tight_layout()
     plt.show()
-
-    print(f'Prediction: {predicted_class}, Fine label: {fine_class_names[superclass_index][fine_label % 5]}')
+    
+    print(f'Prediction: {predicted_class}, Fine label: {get_class_name(fine_label)} (Confidence: {p_prob:.2f})')
